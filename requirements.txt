@@ -1,0 +1,12 @@
+aiohttp
+aiofiles
+matplotlib
+numpy
+pympler
+requests
+torch
+transformers
+uhashring
+pandas
+psutil
+vllm==0.4.2

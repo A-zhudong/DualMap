@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "DualMap"
+version = "0.1.0"
+description = "A project for dualmap system experiments and evaluation."
+authors = [
+    { name = "Ying-Yuan" }
+]
+dependencies = [
+]
+requires-python = ">=3.7"
+
+[tool.setuptools.packages.find]
+where = ["."]
