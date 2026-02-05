@@ -112,7 +112,7 @@ Experiment outputs will be saved in the directory:`./evaluation/result/data/*`
 
 ## Evaluations
 
-### Process result
+### Process Results
 
 ```python
 python evaluation/plots/dataset_performance/goodput_and_effective_req_capacity.py \
@@ -141,3 +141,16 @@ We list some of the primary evaluation results.  All experiments are conducted o
 **Effective request capacity and goodput of different scheduling strategies**
 
 ![image-20260129171533430](README.assets/image-20260129171533430.png)
+
+## Citation
+
+If you use DualMap in your research, please cite our paper:
+
+```bibtex
+@inproceedings{yuan2026dualmap,
+  title={DualMap: Enabling Both Cache Affinity and Load Balancing for Distributed LLM Serving},
+  author={Yuan, Ying and Zuo, Pengfei and Wang, Bo and Chen, Zhangyu and Tan, Zhipeng and Yu, Zhou},
+  booktitle={Proceedings of the 14th International Conference on Learning Representations (ICLR)},
+  year={2026}
+}
+```
