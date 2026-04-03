@@ -28,6 +28,8 @@ class SharedState:
         self.num_replicas = len(self.replicas_ip_port)
         self.replica_budgets: Dict[str, Replica] = {}  # {replica_id: Replica}
         self.replica_slo_budget = args.replica_slo_budget
+        self.tpct = getattr(args, "tpct", args.prefill_tpot)
+        self.tprt = getattr(args, "tprt", 0.0)
         self._result_path = args.result_path
         self._model_name = args.model_name
         self.last_request_time: Optional[float] = None
@@ -37,25 +39,41 @@ class SharedState:
     async def get_min_ttft_replica(self, request: Request):
         chose_replica_id = -1
         target_actual_prefill_len = -1
-        replicas_pending_waiting_budget = {}      
+        replicas_pending_waiting_budget = {}
+        replica_ttft_list = {}
         actual_num_prefill_tokens_list = {}
+        hit_tokens_list = {}
         for rid in range(self.num_replicas):
             replica = self.replica_budgets[rid]
             actual_num_prefill_tokens = replica.get_num_recompute_token_ids(request._input_ids)
+            hit_tokens = replica.get_num_hit_token_ids(request._input_ids)
             current_budget, last_prefill_completed_at, last_ttft, num_pending_requests, qps = await replica.get_load_states()
             replicas_pending_waiting_budget[rid] = current_budget - actual_num_prefill_tokens
             logger.debug(f"req_id={request._id},replicas_pending_waiting_budget[{rid}]={replicas_pending_waiting_budget[rid]}={current_budget}-{actual_num_prefill_tokens}")
             actual_num_prefill_tokens_list[rid] = actual_num_prefill_tokens
-        if replicas_pending_waiting_budget:
-            max_pending_waiting_budget = max(replicas_pending_waiting_budget.values())
-            candidates = [rid for rid, pending_waiting_budget in replicas_pending_waiting_budget.items() if pending_waiting_budget == max_pending_waiting_budget]
+            hit_tokens_list[rid] = hit_tokens
+            waiting_tokens = self.replica_slo_budget - current_budget
+            waiting_hit_tokens = replica.get_num_pending_hit_tokens()
+            # TTFT = (waiting recompute + current recompute) * TPCT + (waiting hit + current hit) * TPRT
+            replica_ttft_list[rid] = round(
+                (waiting_tokens + actual_num_prefill_tokens) * self.tpct + (waiting_hit_tokens + hit_tokens) * self.tprt,
+                4
+            )
+
+        if replica_ttft_list:
+            min_ttft = min(replica_ttft_list.values())
+            candidates = [rid for rid, ttft in replica_ttft_list.items() if ttft == min_ttft]
             rnd = random.Random(42)
             chose_replica_id = rnd.choice(candidates)
             target_actual_prefill_len = actual_num_prefill_tokens_list[chose_replica_id]
         else:
             chose_replica_id = -1  # or some other default value
         pending_tokens = self.replica_slo_budget - (replicas_pending_waiting_budget[chose_replica_id] + target_actual_prefill_len)
-        logger.debug(f"req_id={request._id},chose replica_id={chose_replica_id},waiting_tokens={pending_tokens},actual_prefill_len={target_actual_prefill_len}")
+        logger.debug(
+            f"req_id={request._id},chose replica_id={chose_replica_id},waiting_tokens={pending_tokens},"
+            f"actual_prefill_len={target_actual_prefill_len},hit_tokens={hit_tokens_list.get(chose_replica_id, 0)},"
+            f"ttft={replica_ttft_list.get(chose_replica_id, -1)}"
+        )
         return chose_replica_id, target_actual_prefill_len
 
     async def abort_posting_request_tasks(self, replica_id, request: Request):

@@ -50,6 +50,7 @@ class Config:
     BLOCK_SIZE = 128
     TTFT_SLO = 5 # second
     PREFILL_TPOT = 0.000127# 910b4 and Qwen2.5-7B-Instruct: 0.00016,   910b3 and Qwen2.5-14B-Instruct:0.000127
+    TPRT = 0.0
 
     PROCESS_CACHE_TTL = 1.0
     VLLM_START_TIMEOUT = 120
@@ -83,15 +84,17 @@ block_size = Config.BLOCK_SIZE
 kv_cache_size_per_token = Config.KV_CACHE_SIZE_PER_TOKEN
 ttft_slo = Config.TTFT_SLO
 prefill_tpot = Config.PREFILL_TPOT
+tpct = prefill_tpot
+tprt = Config.TPRT
 enable_scale = Config.ENABLE_SCALE
 
 request_active_timeout = 60 # seconds, client will be killed whnen no response after this timeout
 requests_num_dataset_start = 0
 dh_recompute_punish_ratio = 1
-dh_first_balance_ttft_thredhold = int((ttft_slo/2) * (1/prefill_tpot)) 
+dh_first_balance_ttft_thredhold = int((ttft_slo/2) * (1/tpct)) 
 decode_busy_threshold = ttft_slo # not used
-replica_slo_budget = int((ttft_slo/2) * (1/prefill_tpot) * 2)
-dh_rebalance_thredhold = int((ttft_slo/2) * (1/prefill_tpot) * 2)
+replica_slo_budget = int((ttft_slo/2) * (1/tpct) * 2)
+dh_rebalance_thredhold = int((ttft_slo/2) * (1/tpct) * 2)
 dh_cancel_rebalance_req = False
 dh_window_duration = 30
 dh_replica_pending_req_threshold = 1
@@ -107,6 +110,7 @@ def build_namespace(global_scheduler_type: str, qps: float,
                     dataset_type, dataset_file,
                     request_dataset_dir,
                     balance_type, ttft_slo, replica_slo_budget,
+                    dh_first_balance_ttft_thredhold,
                     dh_recompute_punish_ratio, dh_rebalance_thredhold,
                     dh_rebalance_waiting_latency_thredhold,
                     result_path
@@ -135,8 +139,10 @@ def build_namespace(global_scheduler_type: str, qps: float,
         "global_scheduler_type": global_scheduler_type,
         "balance_type": balance_type, 
         "prefill_tpot": prefill_tpot,
+        "tpct": tpct,
+        "tprt": tprt,
         "decode_busy_threshold": decode_busy_threshold,
-        "dh_first_balance_ttft_thredhold":dh_first_balance_ttft_thredhold,
+        "dh_first_balance_ttft_thredhold": dh_first_balance_ttft_thredhold,
         "dh_rebalance_thredhold": dh_rebalance_thredhold,
         "dh_rebalance_waiting_latency_thredhold":dh_rebalance_waiting_latency_thredhold,
         "dh_recompute_punish_ratio":dh_recompute_punish_ratio,
@@ -671,7 +677,7 @@ def single_experiment(global_scheduler_type: str, qps: float, sys_args):
 def start_exp(global_scheduler_type_list,balance_type_list,qps_list,request_num,dataset_type, dataset_file):
     """Main control flow."""
     for tmp_rebalance_thredhold in tmp_rebalance_thredhold_list:
-        dh_rebalance_thredhold = int(ttft_slo * (1/prefill_tpot) * tmp_rebalance_thredhold)
+        dh_rebalance_thredhold = int(ttft_slo * (1/tpct) * tmp_rebalance_thredhold)
         dh_first_balance_ttft_thredhold = dh_rebalance_thredhold
         replica_slo_budget = dh_rebalance_thredhold
         for qps_str in (qps_list.split(",") if isinstance(qps_list, str) else qps_list):
@@ -716,6 +722,7 @@ def start_exp(global_scheduler_type_list,balance_type_list,qps_list,request_num,
                             dataset_type, dataset_file,
                             request_dataset_dir,
                             balance_type, ttft_slo, replica_slo_budget,
+                            dh_first_balance_ttft_thredhold,
                             dh_recompute_punish_ratio,dh_rebalance_thredhold,
                             dh_rebalance_waiting_latency_thredhold,
                             result_path
@@ -766,6 +773,8 @@ if __name__ == "__main__":
     parser.add_argument('--replica_dram_size', type=int, default=64, help='replica dram size')
     parser.add_argument('--qps', type=str, default="3", help='qps') 
     parser.add_argument('--prefill_tpot', type=float, default=0.000127, help='prefill tpot')  
+    parser.add_argument('--tpct', type=float, default=None, help='time per compute token; defaults to prefill_tpot')
+    parser.add_argument('--tprt', type=float, default=0.0, help='time per read token for KV cache transfer')
     parser.add_argument('--global_scheduler_type', type=str, default="cache_affinity", help='comma-separated scheduler types, e.g. "cache_affinity,dualmap"')  
     parser.add_argument('--ttft_slo', type=int, default=5, help='ttft_slo seconds')  
     parser.add_argument('--request_num', type=int, default=8000, help='request num')  
@@ -785,6 +794,8 @@ if __name__ == "__main__":
     cache_capacity = replica_dram << 30
     replica_num = len(args.replicas_ip_port.split(","))
     prefill_tpot = args.prefill_tpot
+    tpct = args.tpct if args.tpct is not None else args.prefill_tpot
+    tprt = args.tprt
     ttft_slo = args.ttft_slo
 
     

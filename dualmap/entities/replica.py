@@ -42,6 +42,9 @@ class Replica:
         else:
             return len(prompt_token_ids)
 
+    def get_num_hit_token_ids(self, prompt_token_ids: List[int]):
+        return max(0, len(prompt_token_ids) - self.get_num_recompute_token_ids(prompt_token_ids))
+
     def save_token_ids(self, token_ids: List[int]): 
         num_saved_blocks = self.cache.save(token_ids)
         return num_saved_blocks * self.block_size
@@ -83,6 +86,16 @@ class Replica:
 
     def get_num_actual_pending_tokens(self):       
         return max(self.replica_slo_budget - self.current_budget, 0)
+
+    def get_num_pending_hit_tokens(self):
+        hit_tokens = 0
+        for req in self.pending_requests:
+            if req is None:
+                continue
+            req_actual_num_prefill_tokens = getattr(req, "_actual_num_prefill_tokens", 0)
+            req_num_prefill_tokens = getattr(req, "_num_prefill_tokens", len(req._input_ids))
+            hit_tokens += max(0, req_num_prefill_tokens - req_actual_num_prefill_tokens)
+        return hit_tokens
 
     async def get_load_states(self):
         qps = 0

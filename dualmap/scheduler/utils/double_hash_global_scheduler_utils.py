@@ -14,6 +14,7 @@ class GlobalRequestQueue:
         self.queues = [[] for _ in range(num_replicas)]
         self.queues_global_actual_waiting_tokens_count = [0 for _ in range(num_replicas)]
         self.queues_global_input_waiting_tokens_count = [0 for _ in range(num_replicas)]
+        self.queues_global_waiting_hit_tokens_count = [0 for _ in range(num_replicas)]
 
     def _get_request_actual_prefill_tokens(self, request, negtive_prefix_cache_hit_len=None):
         if negtive_prefix_cache_hit_len is not None:
@@ -35,12 +36,18 @@ class GlobalRequestQueue:
     def get_global_input_waiting_tokens_count(self,replica_id):
         return self.queues_global_input_waiting_tokens_count[replica_id]
 
+    def get_global_waiting_hit_tokens_count(self, replica_id):
+        return self.queues_global_waiting_hit_tokens_count[replica_id]
+
     def _recount_pending_tokens(self, replica_id):
         total = 0
+        total_hit_tokens = 0
         for item in self.queues[replica_id]:
             negtive_prefix_cache_hit_len,_,req = item
             total += self._get_request_actual_prefill_tokens(req, negtive_prefix_cache_hit_len)
+            total_hit_tokens += max(0, req._num_prefill_tokens - self._get_request_actual_prefill_tokens(req, negtive_prefix_cache_hit_len))
         self.queues_global_actual_waiting_tokens_count[replica_id] = total
+        self.queues_global_waiting_hit_tokens_count[replica_id] = total_hit_tokens
         return total
 
     def get_queue_len(self, rid):
@@ -72,6 +79,7 @@ class GlobalRequestQueue:
     def push(self, replica_id, request, prefix_cache_hit_len):
         heapq.heappush(self.queues[replica_id], (-prefix_cache_hit_len, request._arrived_at, request))
         self.queues_global_actual_waiting_tokens_count[replica_id] += self._get_request_actual_prefill_tokens(request,-prefix_cache_hit_len)
+        self.queues_global_waiting_hit_tokens_count[replica_id] += max(0, request._num_prefill_tokens - self._get_request_actual_prefill_tokens(request,-prefix_cache_hit_len))
         self.queues_global_input_waiting_tokens_count[replica_id] += len(request._input_ids)
         return
 
@@ -80,6 +88,7 @@ class GlobalRequestQueue:
             item = heapq.heappop(self.queues[replica_id])
             negtive_prefix_cache_hit_len, _, req = item
             self.queues_global_actual_waiting_tokens_count[replica_id] -= self._get_request_actual_prefill_tokens(req,negtive_prefix_cache_hit_len)
+            self.queues_global_waiting_hit_tokens_count[replica_id] -= max(0, req._num_prefill_tokens - self._get_request_actual_prefill_tokens(req,negtive_prefix_cache_hit_len))
             self.queues_global_input_waiting_tokens_count[replica_id] -= len(req._input_ids)
             return req
         return None
@@ -106,6 +115,7 @@ class GlobalRequestQueue:
                 discarded.append(req)
                 logger.debug(f"discard: req_id={req._id},waiting_latency={round(now - arrived_at, 2)}")
                 self.queues_global_actual_waiting_tokens_count[replica_id] -= self._get_request_actual_prefill_tokens(req,negtive_prefix_cache_hit_len)
+                self.queues_global_waiting_hit_tokens_count[replica_id] -= max(0, req._num_prefill_tokens - self._get_request_actual_prefill_tokens(req,negtive_prefix_cache_hit_len))
                 self.queues_global_input_waiting_tokens_count[replica_id] -= len(req._input_ids)
             else:
                 new_queue.append(item)
@@ -123,6 +133,7 @@ class GlobalRequestQueue:
                 del queue[idx]
                 heapq.heapify(queue)
                 self.queues_global_actual_waiting_tokens_count[replica_id] -= self._get_request_actual_prefill_tokens(req,negtive_prefix_cache_hit_len)
+                self.queues_global_waiting_hit_tokens_count[replica_id] -= max(0, req._num_prefill_tokens - self._get_request_actual_prefill_tokens(req,negtive_prefix_cache_hit_len))
                 self.queues_global_input_waiting_tokens_count[replica_id] -= len(req._input_ids)
                 return True
         return False
@@ -140,6 +151,7 @@ class GlobalRequestQueue:
             pop_count += 1
             cur_replica_budget -= actual_num_prefill_tokens
             self.queues_global_actual_waiting_tokens_count[replica_id] -= actual_num_prefill_tokens
+            self.queues_global_waiting_hit_tokens_count[replica_id] -= max(0, req._num_prefill_tokens - actual_num_prefill_tokens)
             self.queues_global_input_waiting_tokens_count[replica_id] -= len(req._input_ids)
             logger.debug(f"pop_schedulable:replica_id={replica_id},cur_replica_budget={cur_replica_budget},req={req._id},"
                         f"input_len={len(req._input_ids)},_num_prefill_tokens={req._num_prefill_tokens},"
@@ -159,6 +171,19 @@ class GlobalRequestQueue:
                 break
             total_tokens += self._get_request_actual_prefill_tokens(req, negtive_prefix_cache_hit_len)
         return total_tokens
+
+    def get_num_global_waiting_hit_tokens(self, replica_id, request, prefix_cache_hit_len):
+        queue = self.queues[replica_id]
+        new_item = (-prefix_cache_hit_len, request._arrived_at, request)
+        simulated_queue = sorted(queue + [new_item])
+        total_hit_tokens = 0
+        for item in simulated_queue:
+            negtive_prefix_cache_hit_len, _, req = item
+            if req == request:
+                break
+            actual_num_prefill_tokens = self._get_request_actual_prefill_tokens(req, negtive_prefix_cache_hit_len)
+            total_hit_tokens += max(0, req._num_prefill_tokens - actual_num_prefill_tokens)
+        return total_hit_tokens
     
 class DoubleHashGlobalSchedulerUtils():
     def __init__(self, num_replicas, shared_state: SharedState, args):
@@ -170,11 +195,19 @@ class DoubleHashGlobalSchedulerUtils():
         self.dh_replica_pending_req_threshold = args.dh_replica_pending_req_threshold
         self.dh_rebalance_waiting_latency_thredhold = args.dh_rebalance_waiting_latency_thredhold
         self.prefill_tpot = args.prefill_tpot
+        self.tpct = getattr(args, "tpct", self.prefill_tpot)
+        self.tprt = getattr(args, "tprt", 0.0)
         self.replica_slo_budget = args.replica_slo_budget
         self.dh_recompute_punish_ratio = args.dh_recompute_punish_ratio
         self.rebalance_cnt = 0
         self.busy_prefill_interval = args.busy_prefill_interval
         self.global_request_queue = GlobalRequestQueue(num_replicas)
+
+    def estimate_ttft(self, waiting_tokens, waiting_hit_tokens, hit_tokens):
+        return round(waiting_tokens * self.tpct + (waiting_hit_tokens + hit_tokens) * self.tprt, 4)
+
+    def estimate_recompute_latency(self, recompute_tokens, hit_tokens):
+        return round(recompute_tokens * self.tpct + hit_tokens * self.tprt, 4)
 
     def _init_hash_rings(self, num_nodes):
         nodes = [str(i) for i in range(num_nodes)]
@@ -196,16 +229,27 @@ class DoubleHashGlobalSchedulerUtils():
 
     async def get_schedulable_waiting_req_list(self):
         schedulable_waiting_req_list = []
+        rebalance_ttft_threshold = self.dh_rebalance_thredhold * self.tpct
         #rebalance
         for rid in range(self._num_replicas):
             max_waiting_delay = self.global_request_queue.get_max_waiting_delay(rid)
             global_waiting_tokens = self.global_request_queue.get_global_actual_waiting_tokens_count(rid)
+            global_waiting_hit_tokens = self.global_request_queue.get_global_waiting_hit_tokens_count(rid)
             num_local_actual_pending_tokens = self.shared_state.get_num_actual_pending_tokens_replica(rid)
-            num_pending_tokens = global_waiting_tokens + num_local_actual_pending_tokens
-            if num_pending_tokens > self.dh_rebalance_thredhold \
+            replica = self.shared_state.replica_budgets[rid]
+            num_local_pending_hit_tokens = replica.get_num_pending_hit_tokens()
+            pending_ttft = self.estimate_ttft(
+                global_waiting_tokens + num_local_actual_pending_tokens,
+                global_waiting_hit_tokens + num_local_pending_hit_tokens,
+                0
+            )
+            if pending_ttft > rebalance_ttft_threshold \
                 or max_waiting_delay >= self.dh_rebalance_waiting_latency_thredhold:
                 logger.debug(f"rebalance:rid={rid},{max_waiting_delay} >= {self.dh_rebalance_waiting_latency_thredhold}")
-                await self.rebalance_replica_global_waiting_reqs(rid, num_pending_tokens - self.dh_rebalance_thredhold)
+                await self.rebalance_replica_global_waiting_reqs(
+                    rid,
+                    global_waiting_tokens + num_local_actual_pending_tokens - self.dh_rebalance_thredhold
+                )
 
         for rid in range(self._num_replicas):
             replica = self.shared_state.replica_budgets[rid]
@@ -253,8 +297,11 @@ class DoubleHashGlobalSchedulerUtils():
         req_qps_list = {} #{replica_id:qps}
         recompute_latency_list = {} 
         num_global_actual_waiting_tokens_list = {}
+        num_global_waiting_hit_tokens_list = {}
         num_replica_actual_pending_tokens_list = {}
+        num_replica_pending_hit_tokens_list = {}
         num_req_actual_prefill_tokens_list = {}
+        num_req_hit_tokens_list = {}
         prefix_cache_hit_len_list = {}
 
         cost_list = {} 
@@ -267,9 +314,12 @@ class DoubleHashGlobalSchedulerUtils():
 
         for replica_id in chosen_replica_ids:
             num_global_actual_waiting_tokens_list[replica_id] = self.global_request_queue.get_global_actual_waiting_tokens_count(replica_id)
+            num_global_waiting_hit_tokens_list[replica_id] = self.global_request_queue.get_global_waiting_hit_tokens_count(replica_id)
             replica = self.shared_state.replica_budgets[replica_id]
             num_replica_actual_pending_tokens_list[replica_id] = self.shared_state.get_num_actual_pending_tokens_replica(replica_id)
+            num_replica_pending_hit_tokens_list[replica_id] = replica.get_num_pending_hit_tokens()
             num_req_actual_prefill_tokens_list[replica_id] = replica.get_num_recompute_token_ids(request._input_ids)
+            num_req_hit_tokens_list[replica_id] = replica.get_num_hit_token_ids(request._input_ids)
 
             # for dualmap_least_loaded
             pending_input_tokens_list[replica_id] = self.global_request_queue.get_global_input_waiting_tokens_count(replica_id) + self.shared_state.get_pending_input_tokens_replica(replica_id)
@@ -280,11 +330,18 @@ class DoubleHashGlobalSchedulerUtils():
             num_virtual_pending_tokens_list[replica_id] = num_global_actual_waiting_tokens_list[replica_id] + \
                                                         num_replica_actual_pending_tokens_list[replica_id] + \
                                                         num_req_actual_prefill_tokens_list[replica_id]
-            ttft_list[replica_id] = round(num_virtual_pending_tokens_list[replica_id] * self.prefill_tpot, 4)
+            ttft_list[replica_id] = self.estimate_ttft(
+                num_virtual_pending_tokens_list[replica_id],
+                num_global_waiting_hit_tokens_list[replica_id] + num_replica_pending_hit_tokens_list[replica_id],
+                num_req_hit_tokens_list[replica_id],
+            )
             # for ["nb_cost1", "rb_cost1","rb_cost1_aggresive","rb_cost1_avg"]
             current_budget, last_prefill_completed_at, last_ttft, num_pending_requests, qps = await replica.get_load_states()
             req_qps_list[replica_id] = qps
-            recompute_latency_list[replica_id] = round(num_req_actual_prefill_tokens_list[replica_id] * self.prefill_tpot, 4)
+            recompute_latency_list[replica_id] = self.estimate_recompute_latency(
+                num_req_actual_prefill_tokens_list[replica_id],
+                num_req_hit_tokens_list[replica_id],
+            )
             cost_list[replica_id] = round(ttft_list[replica_id] + self.dh_recompute_punish_ratio * ttft_list[replica_id] * req_qps_list[replica_id] * recompute_latency_list[replica_id],4)
 
             # for rebalance 
@@ -323,6 +380,8 @@ class DoubleHashGlobalSchedulerUtils():
             return primary_replica_id, second_replica_id
 
         dh_type = self._balance_type
+        first_balance_ttft_threshold = self.dh_first_balance_ttft_thredhold * self.tpct
+        rebalance_ttft_threshold = self.dh_rebalance_thredhold * self.tpct
         if self._balance_type in ["dualmap_least_loaded"]:
             primary_replica_id, second_replica_id = select_replicas_based_on_metrics(
                 pending_input_tokens_list, running_req_blocks_cnt_list, chosen_replica_ids, primary_is_max=False
@@ -340,7 +399,7 @@ class DoubleHashGlobalSchedulerUtils():
             is_replica_overloaded = {}
             for replica_id in chosen_replica_ids:
                 is_replica_overloaded[replica_id] = False
-                if num_virtual_pending_tokens_list[replica_id] > self.dh_first_balance_ttft_thredhold:
+                if ttft_list[replica_id] > first_balance_ttft_threshold:
                     is_replica_overloaded[replica_id] = True
 
             cache_hit_high_rep_id, cache_hit_low_rep_id = select_replicas_based_on_metrics(
@@ -394,12 +453,18 @@ class DoubleHashGlobalSchedulerUtils():
         num_pending_tokens_list = {}
         for replica_id in chosen_replica_ids:
             is_replica_overloaded[replica_id] = False
-            num_pending_tokens = 0
+            pending_hit_tokens = num_global_waiting_hit_tokens_list[replica_id] + num_replica_pending_hit_tokens_list[replica_id]
             if replica_id == primary_replica_id:
                 num_pending_tokens_list[replica_id] = num_virtual_pending_tokens_list[replica_id]
+                pending_ttft = ttft_list[replica_id]
             else:
                 num_pending_tokens_list[replica_id] = num_virtual_pending_tokens_list[replica_id] - num_req_actual_prefill_tokens_list[replica_id]
-            if num_pending_tokens_list[replica_id] > self.dh_rebalance_thredhold \
+                pending_ttft = self.estimate_ttft(
+                    num_pending_tokens_list[replica_id],
+                    pending_hit_tokens,
+                    0,
+                )
+            if pending_ttft > rebalance_ttft_threshold \
                 or max_waiting_delay_list[replica_id] >= self.dh_rebalance_waiting_latency_thredhold:
                 is_replica_overloaded[replica_id] = True
 
@@ -416,6 +481,7 @@ class DoubleHashGlobalSchedulerUtils():
     async def rebalance_replica_global_waiting_reqs(self, source_replica_id, num_target_migrate_prefill_tokens):
         if self._balance_type not in ["dualmap"]: # "ttft_slo_aggresive", "rb_cost1_aggresive", "ttft_avg", "rb_cost1_avg"
             return
+        rebalance_ttft_threshold = self.dh_rebalance_thredhold * self.tpct
         global_num_request_waiting = self.global_request_queue.get_queue_len(source_replica_id)
         if global_num_request_waiting <= 1:
             return
@@ -434,14 +500,18 @@ class DoubleHashGlobalSchedulerUtils():
         num_replicas = self._num_replicas
        
         num_global_actual_waiting_tokens_list = {}
+        num_global_waiting_hit_tokens_list = {}
         num_replica_actual_pending_tokens_list = {}
+        num_replica_pending_hit_tokens_list = {}
         num_req_actual_prefill_tokens_list = {}
         max_waiting_delay_list = {}
         req_qps_list = {} #{replica_id:qps}
 
         for replica_id in range(self._num_replicas):
             num_global_actual_waiting_tokens_list[replica_id] = self.global_request_queue.get_global_actual_waiting_tokens_count(replica_id)
+            num_global_waiting_hit_tokens_list[replica_id] = self.global_request_queue.get_global_waiting_hit_tokens_count(replica_id)
             num_replica_actual_pending_tokens_list[replica_id] = self.shared_state.get_num_actual_pending_tokens_replica(replica_id)
+            num_replica_pending_hit_tokens_list[replica_id] = self.shared_state.replica_budgets[replica_id].get_num_pending_hit_tokens()
             max_waiting_delay_list[replica_id] = self.global_request_queue.get_max_waiting_delay(replica_id)
             replica = self.shared_state.replica_budgets[replica_id]
             current_budget, last_prefill_completed_at, last_ttft, num_pending_requests, qps = await replica.get_load_states()
@@ -461,11 +531,19 @@ class DoubleHashGlobalSchedulerUtils():
                 # source_prefill_time
                 # source_actual_prefill_len
                 source_actual_prefill_len = source_replica.get_num_recompute_token_ids(cur_request._input_ids)
+                source_hit_tokens = source_replica.get_num_hit_token_ids(cur_request._input_ids)
                 source_num_global_waiting_prefill_tokens = self.global_request_queue.get_num_global_actual_waiting_tokens(source_replica_id, cur_request, 
                                                                                                                          max(0,cur_request._num_prefill_tokens - source_actual_prefill_len))
+                source_num_global_waiting_hit_tokens = self.global_request_queue.get_num_global_waiting_hit_tokens(
+                    source_replica_id,
+                    cur_request,
+                    max(0, cur_request._num_prefill_tokens - source_actual_prefill_len),
+                )
 
-                source_ttft = (num_replica_actual_pending_tokens_list[source_replica_id] + source_num_global_waiting_prefill_tokens + source_actual_prefill_len) * self.prefill_tpot
-                source_recompute_latency = source_actual_prefill_len * self.prefill_tpot
+                source_waiting_tokens = num_replica_actual_pending_tokens_list[source_replica_id] + source_num_global_waiting_prefill_tokens + source_actual_prefill_len
+                source_waiting_hit_tokens = num_replica_pending_hit_tokens_list[source_replica_id] + source_num_global_waiting_hit_tokens
+                source_ttft = self.estimate_ttft(source_waiting_tokens, source_waiting_hit_tokens, source_hit_tokens)
+                source_recompute_latency = self.estimate_recompute_latency(source_actual_prefill_len, source_hit_tokens)
                 source_num_delay_requests = max(req_qps_list[source_replica_id] * source_ttft, len(source_global_waiting_requests) - (req_index + 1)) 
                 source_cost = source_ttft + self.dh_recompute_punish_ratio * source_num_delay_requests * source_recompute_latency
                 
@@ -487,6 +565,7 @@ class DoubleHashGlobalSchedulerUtils():
                 # insert cur_request to target_replica tail
                 target_replica = self.shared_state.replica_budgets[target_replica_id]
                 target_actual_prefill_len = target_replica.get_num_recompute_token_ids(cur_request._input_ids)
+                target_hit_tokens = target_replica.get_num_hit_token_ids(cur_request._input_ids)
 
                 # target_num_waiting_token = num_global_actual_waiting_tokens_list[target_replica_id]
                 target_virtual_pending_tokens = num_global_actual_waiting_tokens_list[target_replica_id] + \
@@ -494,9 +573,11 @@ class DoubleHashGlobalSchedulerUtils():
                                                 target_actual_prefill_len
                 
                 # check target_replica load
-                if  source_replica_id == target_replica_id or target_virtual_pending_tokens > self.dh_rebalance_thredhold \
+                target_waiting_hit_tokens = num_global_waiting_hit_tokens_list[target_replica_id] + num_replica_pending_hit_tokens_list[target_replica_id]
+                target_overload_ttft = self.estimate_ttft(target_virtual_pending_tokens, target_waiting_hit_tokens, target_hit_tokens)
+                if  source_replica_id == target_replica_id or target_overload_ttft > rebalance_ttft_threshold \
                     or max_waiting_delay_list[target_replica_id] >= self.dh_rebalance_waiting_latency_thredhold: 
-                    logger.debug(f"target_replica_id={target_replica_id},target_virtual_pending_tokens={target_virtual_pending_tokens},or"
+                    logger.debug(f"target_replica_id={target_replica_id},target_overload_ttft={target_overload_ttft},or"
                             f"{max_waiting_delay_list[target_replica_id]}>{self.dh_rebalance_waiting_latency_thredhold}")
                     # target_replica is overloaded
                     if enable_migrate_to_neighbor_replica is False:
@@ -515,9 +596,12 @@ class DoubleHashGlobalSchedulerUtils():
                         tmp_target_virtual_pending_tokens = num_global_actual_waiting_tokens_list[tmp_target_replica_id] + \
                                                         num_replica_actual_pending_tokens_list[tmp_target_replica_id] + \
                                                         tmp_target_actual_prefill_len
-                        if tmp_target_virtual_pending_tokens > self.dh_rebalance_thredhold \
+                        tmp_target_hit_tokens = tmp_target_replica.get_num_hit_token_ids(cur_request._input_ids)
+                        tmp_target_waiting_hit_tokens = num_global_waiting_hit_tokens_list[tmp_target_replica_id] + num_replica_pending_hit_tokens_list[tmp_target_replica_id]
+                        tmp_target_overload_ttft = self.estimate_ttft(tmp_target_virtual_pending_tokens, tmp_target_waiting_hit_tokens, tmp_target_hit_tokens)
+                        if tmp_target_overload_ttft > rebalance_ttft_threshold \
                             or max_waiting_delay_list[tmp_target_replica_id] >= self.dh_rebalance_waiting_latency_thredhold: 
-                            logger.debug(f"tmp_target_replica_id={tmp_target_replica_id},tmp_target_virtual_pending_tokens={tmp_target_virtual_pending_tokens},or"
+                            logger.debug(f"tmp_target_replica_id={tmp_target_replica_id},tmp_target_overload_ttft={tmp_target_overload_ttft},or"
                                         f"{max_waiting_delay_list[tmp_target_replica_id]} >= {self.dh_rebalance_waiting_latency_thredhold}")
                             continue
                         else:
@@ -528,12 +612,21 @@ class DoubleHashGlobalSchedulerUtils():
                 target_actual_prefill_len = target_replica.get_num_recompute_token_ids(cur_request._input_ids)
                 target_num_global_actual_waiting_tokens = self.global_request_queue.get_num_global_actual_waiting_tokens(target_replica_id, cur_request, 
                                                                                                                          max(0,cur_request._num_prefill_tokens - target_actual_prefill_len))
+                target_num_global_waiting_hit_tokens = self.global_request_queue.get_num_global_waiting_hit_tokens(
+                    target_replica_id,
+                    cur_request,
+                    max(0, cur_request._num_prefill_tokens - target_actual_prefill_len),
+                )
                 target_virtual_pending_tokens = target_num_global_actual_waiting_tokens + \
                                                 num_replica_actual_pending_tokens_list[target_replica_id] + \
                                                 target_actual_prefill_len
-                                 
-                target_ttft = round(target_virtual_pending_tokens * self.prefill_tpot, 4)
-                target_recompute_latency = round(target_actual_prefill_len * self.prefill_tpot, 4)
+
+                target_ttft = self.estimate_ttft(
+                    target_virtual_pending_tokens,
+                    num_replica_pending_hit_tokens_list[target_replica_id] + target_num_global_waiting_hit_tokens,
+                    target_hit_tokens,
+                )
+                target_recompute_latency = self.estimate_recompute_latency(target_actual_prefill_len, target_hit_tokens)
                 target_num_delay_requests = round(req_qps_list[target_replica_id] * target_ttft, 4) 
                 target_cost = round(target_ttft + self.dh_recompute_punish_ratio * target_num_delay_requests * target_recompute_latency, 4)
 

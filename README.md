@@ -76,6 +76,8 @@ python ./start_up.py \
 --replica_dram_size 64 \
 --qps 10 \
 --prefill_tpot 0.00016 \
+--tpct 0.00016 \
+--tprt 0.0 \
 --global_scheduler_type "cache_affinity" \
 --ttft_slo 5 \
 --request_num 8000 \
@@ -98,6 +100,8 @@ python ./start_up.py \
 | **replica_dram_size**       | The amount of DRAM (in GB) allocated per replica for KV-cache management. |
 | **qps**                     | Query-per-second (QPS) rates at which the client sends requests to the global scheduler. |
 | **prefill_tpot**            | The average processing time per token (in seconds) during the prefill phase on a single inference instance under interference-free conditions. |
+| **tpct**                    | Time per compute token for TTFT estimation. Defaults to `prefill_tpot` when omitted. |
+| **tprt**                    | Time per read token for KV-cache transfer in TTFT estimation. |
 | **global_scheduler_type**   | Types of global schedulers to be compared (e.g., `"cache_affinity, min_pending_input, min_ttft, preble,dualmap"`). |
 | **ttft_slo**                | Seconds                                                      |
 | **request_num**             | Number of requests which the client sends to the global scheduler. |
