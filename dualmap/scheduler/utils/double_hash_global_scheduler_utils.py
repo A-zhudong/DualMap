@@ -197,14 +197,27 @@ class DoubleHashGlobalSchedulerUtils():
         self.prefill_tpot = args.prefill_tpot
         self.tpct = getattr(args, "tpct", self.prefill_tpot)
         self.tprt = getattr(args, "tprt", 0.0)
+        self.local_hit_tprt = getattr(args, "local_hit_tprt", 0.0)
+        self.remote_hit_tprt = getattr(args, "remote_hit_tprt", self.tprt)
         self.replica_slo_budget = args.replica_slo_budget
         self.dh_recompute_punish_ratio = args.dh_recompute_punish_ratio
         self.rebalance_cnt = 0
         self.busy_prefill_interval = args.busy_prefill_interval
         self.global_request_queue = GlobalRequestQueue(num_replicas)
 
-    def estimate_ttft(self, waiting_tokens, waiting_hit_tokens, hit_tokens):
-        return round(waiting_tokens * self.tpct + (waiting_hit_tokens + hit_tokens) * self.tprt, 4)
+    def estimate_ttft(self, waiting_tokens, waiting_hit_tokens, hit_tokens, waiting_local_hit_tokens=0, local_hit_tokens=0):
+        waiting_remote_hit_tokens = max(0, waiting_hit_tokens - waiting_local_hit_tokens)
+        remote_hit_tokens = max(0, hit_tokens - local_hit_tokens)
+        # Cost split used by scheduler scoring:
+        # - miss/prefill tokens            -> tpct
+        # - local reuse tokens             -> local_hit_tprt
+        # - cross-instance reuse tokens    -> remote_hit_tprt
+        return round(
+            waiting_tokens * self.tpct
+            + (waiting_local_hit_tokens + local_hit_tokens) * self.local_hit_tprt
+            + (waiting_remote_hit_tokens + remote_hit_tokens) * self.remote_hit_tprt,
+            4,
+        )
 
     def estimate_recompute_latency(self, recompute_tokens, hit_tokens):
         return round(recompute_tokens * self.tpct + hit_tokens * self.tprt, 4)
@@ -238,10 +251,12 @@ class DoubleHashGlobalSchedulerUtils():
             num_local_actual_pending_tokens = self.shared_state.get_num_actual_pending_tokens_replica(rid)
             replica = self.shared_state.replica_budgets[rid]
             num_local_pending_hit_tokens = replica.get_num_pending_hit_tokens()
+            num_local_pending_local_hit_tokens = replica.get_num_pending_local_hit_tokens()
             pending_ttft = self.estimate_ttft(
                 global_waiting_tokens + num_local_actual_pending_tokens,
                 global_waiting_hit_tokens + num_local_pending_hit_tokens,
-                0
+                0,
+                waiting_local_hit_tokens=num_local_pending_local_hit_tokens,
             )
             if pending_ttft > rebalance_ttft_threshold \
                 or max_waiting_delay >= self.dh_rebalance_waiting_latency_thredhold:
@@ -302,6 +317,7 @@ class DoubleHashGlobalSchedulerUtils():
         num_replica_pending_hit_tokens_list = {}
         num_req_actual_prefill_tokens_list = {}
         num_req_hit_tokens_list = {}
+        num_req_local_hit_tokens_list = {}
         prefix_cache_hit_len_list = {}
 
         cost_list = {} 
@@ -320,6 +336,7 @@ class DoubleHashGlobalSchedulerUtils():
             num_replica_pending_hit_tokens_list[replica_id] = replica.get_num_pending_hit_tokens()
             num_req_actual_prefill_tokens_list[replica_id] = replica.get_num_recompute_token_ids(request._input_ids)
             num_req_hit_tokens_list[replica_id] = replica.get_num_hit_token_ids(request._input_ids)
+            num_req_local_hit_tokens_list[replica_id] = replica.get_num_local_hit_token_ids(request._input_ids)
 
             # for dualmap_least_loaded
             pending_input_tokens_list[replica_id] = self.global_request_queue.get_global_input_waiting_tokens_count(replica_id) + self.shared_state.get_pending_input_tokens_replica(replica_id)
@@ -334,6 +351,8 @@ class DoubleHashGlobalSchedulerUtils():
                 num_virtual_pending_tokens_list[replica_id],
                 num_global_waiting_hit_tokens_list[replica_id] + num_replica_pending_hit_tokens_list[replica_id],
                 num_req_hit_tokens_list[replica_id],
+                waiting_local_hit_tokens=replica.get_num_pending_local_hit_tokens(),
+                local_hit_tokens=num_req_local_hit_tokens_list[replica_id],
             )
             # for ["nb_cost1", "rb_cost1","rb_cost1_aggresive","rb_cost1_avg"]
             current_budget, last_prefill_completed_at, last_ttft, num_pending_requests, qps = await replica.get_load_states()

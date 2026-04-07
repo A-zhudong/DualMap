@@ -8,6 +8,8 @@ from dualmap.entities.replica import Replica
 from dualmap.entities.request import Request
 from dualmap.client.open_ai import async_send_request
 from dualmap.entities.benchmark_utils_preble import RequestFuncOutput
+from dualmap.cache_manager.kvcache_store.kvcache_engine import KvCacheEngine
+from dualmap.cache_manager.kvcache_store.shared_prefix_kvcache_pool import SharedPrefixKvCachePool
 from dualmap.logger import init_logger
 
 logger = init_logger(__name__)
@@ -30,11 +32,23 @@ class SharedState:
         self.replica_slo_budget = args.replica_slo_budget
         self.tpct = getattr(args, "tpct", args.prefill_tpot)
         self.tprt = getattr(args, "tprt", 0.0)
+        self.local_hit_tprt = getattr(args, "local_hit_tprt", 0.0)
+        self.remote_hit_tprt = getattr(args, "remote_hit_tprt", self.tprt)
+        self.enable_shared_kv_pool = getattr(args, "enable_shared_kv_pool", False)
         self._result_path = args.result_path
         self._model_name = args.model_name
         self.last_request_time: Optional[float] = None
+        self.shared_cache_pool = None
+        if self.enable_shared_kv_pool:
+            cache_engine = KvCacheEngine(args.cache_capacity, args.block_size, args.kv_cache_size_per_token)
+            self.shared_cache_pool = SharedPrefixKvCachePool(cache_engine)
         for replica_id in range(self.num_replicas):
-            self.replica_budgets[replica_id] = Replica(replica_id, self.tokenizer, args)  
+            self.replica_budgets[replica_id] = Replica(
+                replica_id,
+                self.tokenizer,
+                args,
+                shared_cache_pool=self.shared_cache_pool,
+            )
 
     async def get_min_ttft_replica(self, request: Request):
         chose_replica_id = -1
@@ -43,21 +57,33 @@ class SharedState:
         replica_ttft_list = {}
         actual_num_prefill_tokens_list = {}
         hit_tokens_list = {}
+        local_hit_tokens_list = {}
+        remote_hit_tokens_list = {}
         for rid in range(self.num_replicas):
             replica = self.replica_budgets[rid]
             actual_num_prefill_tokens = replica.get_num_recompute_token_ids(request._input_ids)
-            hit_tokens = replica.get_num_hit_token_ids(request._input_ids)
+            local_hit_tokens = replica.get_num_local_hit_token_ids(request._input_ids)
+            remote_hit_tokens = replica.get_num_remote_hit_token_ids(request._input_ids)
+            hit_tokens = local_hit_tokens + remote_hit_tokens
             current_budget, last_prefill_completed_at, last_ttft, num_pending_requests, qps = await replica.get_load_states()
             replicas_pending_waiting_budget[rid] = current_budget - actual_num_prefill_tokens
             logger.debug(f"req_id={request._id},replicas_pending_waiting_budget[{rid}]={replicas_pending_waiting_budget[rid]}={current_budget}-{actual_num_prefill_tokens}")
             actual_num_prefill_tokens_list[rid] = actual_num_prefill_tokens
             hit_tokens_list[rid] = hit_tokens
+            local_hit_tokens_list[rid] = local_hit_tokens
+            remote_hit_tokens_list[rid] = remote_hit_tokens
             waiting_tokens = self.replica_slo_budget - current_budget
-            waiting_hit_tokens = replica.get_num_pending_hit_tokens()
-            # TTFT = (waiting recompute + current recompute) * TPCT + (waiting hit + current hit) * TPRT
+            waiting_local_hit_tokens = replica.get_num_pending_local_hit_tokens()
+            waiting_remote_hit_tokens = replica.get_num_pending_remote_hit_tokens()
+            # TTFT decomposition:
+            # - miss tokens (waiting/current)                -> tpct
+            # - local reuse tokens (waiting/current)         -> local_hit_tprt
+            # - cross-instance reuse tokens (waiting/current)-> remote_hit_tprt
             replica_ttft_list[rid] = round(
-                (waiting_tokens + actual_num_prefill_tokens) * self.tpct + (waiting_hit_tokens + hit_tokens) * self.tprt,
-                4
+                (waiting_tokens + actual_num_prefill_tokens) * self.tpct
+                + (waiting_local_hit_tokens + local_hit_tokens) * self.local_hit_tprt
+                + (waiting_remote_hit_tokens + remote_hit_tokens) * self.remote_hit_tprt,
+                4,
             )
 
         if replica_ttft_list:
@@ -71,7 +97,9 @@ class SharedState:
         pending_tokens = self.replica_slo_budget - (replicas_pending_waiting_budget[chose_replica_id] + target_actual_prefill_len)
         logger.debug(
             f"req_id={request._id},chose replica_id={chose_replica_id},waiting_tokens={pending_tokens},"
-            f"actual_prefill_len={target_actual_prefill_len},hit_tokens={hit_tokens_list.get(chose_replica_id, 0)},"
+            f"actual_prefill_len={target_actual_prefill_len},"
+            f"local_hit_tokens={local_hit_tokens_list.get(chose_replica_id, 0)},"
+            f"remote_hit_tokens={remote_hit_tokens_list.get(chose_replica_id, 0)},"
             f"ttft={replica_ttft_list.get(chose_replica_id, -1)}"
         )
         return chose_replica_id, target_actual_prefill_len
