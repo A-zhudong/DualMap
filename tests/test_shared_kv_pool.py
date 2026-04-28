@@ -37,6 +37,7 @@ def _args(enable_shared=True):
         priority_policy="quantile",
         priority_quantile=0.99,
         priority_window_size=256,
+        request_priority_affects_queue=False,
         result_path="/tmp",
         model_name="test-model",
         balance_type="dualmap_min_ttft",
@@ -257,7 +258,7 @@ def test_lightweight_integration_request_lifecycle_for_cross_instance_reuse():
 
 
 def test_pr1_global_queue_order_priority_then_cache_hit_then_arrival():
-    queue = GlobalRequestQueue(num_replicas=1)
+    queue = GlobalRequestQueue(num_replicas=1, use_priority_sort=True)
     high_low_hit = _req_with_arrival(req_id=301, arrival=3.0)
     setattr(high_low_hit, "_priority_rank", 0)
     low_high_hit = _req_with_arrival(req_id=302, arrival=1.0)
@@ -276,6 +277,21 @@ def test_pr1_global_queue_order_priority_then_cache_hit_then_arrival():
     assert queue.pop(0)._id == 304
     assert queue.pop(0)._id == 301  # high priority beats low priority
     assert queue.pop(0)._id == 302
+
+
+def test_pr1_global_queue_default_ignores_priority_rank():
+    queue = GlobalRequestQueue(num_replicas=1, use_priority_sort=False)
+    high_low_hit = _req_with_arrival(req_id=331, arrival=3.0)
+    setattr(high_low_hit, "_priority_rank", 0)
+    low_high_hit = _req_with_arrival(req_id=332, arrival=1.0)
+    setattr(low_high_hit, "_priority_rank", 1)
+
+    queue.push(0, high_low_hit, prefix_cache_hit_len=1)
+    queue.push(0, low_high_hit, prefix_cache_hit_len=99)
+
+    # With default queue behavior, cache-hit/arrival ordering dominates.
+    assert queue.pop(0)._id == 332
+    assert queue.pop(0)._id == 331
 
 
 def test_pr1_add_request_sets_predicted_ttft_and_priority():

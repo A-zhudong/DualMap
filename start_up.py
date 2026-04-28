@@ -57,6 +57,7 @@ class Config:
     PRIORITY_POLICY = "quantile"
     PRIORITY_QUANTILE = 0.99
     PRIORITY_WINDOW_SIZE = 256
+    REQUEST_PRIORITY_AFFECTS_QUEUE = False
     ENABLE_SHARED_KV_POOL = False
     FORCE_OUTPUT_LEN_1 = False
 
@@ -100,6 +101,7 @@ priority_policy = Config.PRIORITY_POLICY
 priority_quantile = Config.PRIORITY_QUANTILE
 priority_window_size = Config.PRIORITY_WINDOW_SIZE
 priority_enabled = Config.PRIORITY_ENABLED
+request_priority_affects_queue = Config.REQUEST_PRIORITY_AFFECTS_QUEUE
 enable_shared_kv_pool = Config.ENABLE_SHARED_KV_POOL
 force_output_len_1 = Config.FORCE_OUTPUT_LEN_1
 enable_scale = Config.ENABLE_SCALE
@@ -163,6 +165,7 @@ def build_namespace(global_scheduler_type: str, qps: float,
         "priority_quantile": priority_quantile,
         "priority_window_size": priority_window_size,
         "priority_enabled": priority_enabled,
+        "request_priority_affects_queue": request_priority_affects_queue,
         "enable_shared_kv_pool": enable_shared_kv_pool,
         "force_output_len_1": force_output_len_1,
         "decode_busy_threshold": decode_busy_threshold,
@@ -805,6 +808,7 @@ if __name__ == "__main__":
     parser.add_argument('--priority_policy', type=str, default="quantile", choices=["threshold", "quantile"], help='priority policy: quantile(default) or threshold')
     parser.add_argument('--priority_quantile', type=float, default=0.99, help='quantile used when --priority_policy=quantile')
     parser.add_argument('--priority_window_size', type=int, default=256, help='history window size used when --priority_policy=quantile')
+    parser.add_argument('--request_priority_affects_queue', action='store_true', help='if set, global queue ordering uses request priority rank before cache-hit/arrival')
     parser.add_argument('--enable_shared_kv_pool', action='store_true', help='enable shared KV pool semantics across replicas')
     parser.add_argument('--force_output_len_1', action='store_true', help='force max output tokens to 1 for prefill-focused runs')
     parser.add_argument('--global_scheduler_type', type=str, default="cache_affinity", help='comma-separated scheduler types, e.g. "cache_affinity,dualmap"')  
@@ -834,6 +838,7 @@ if __name__ == "__main__":
     priority_quantile = args.priority_quantile
     priority_window_size = args.priority_window_size
     priority_enabled = args.priority_enabled
+    request_priority_affects_queue = args.request_priority_affects_queue
     enable_shared_kv_pool = args.enable_shared_kv_pool
     force_output_len_1 = args.force_output_len_1
     ttft_slo = args.ttft_slo

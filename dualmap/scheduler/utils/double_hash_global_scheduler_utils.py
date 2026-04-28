@@ -11,12 +11,18 @@ import time
 logger = init_logger(__name__)
 
 class GlobalRequestQueue:
-    def __init__(self, num_replicas):
+    def __init__(self, num_replicas, use_priority_sort: bool = False):
         self.num_replicas = num_replicas
         self.queues = [[] for _ in range(num_replicas)]
         self.queues_global_actual_waiting_tokens_count = [0 for _ in range(num_replicas)]
         self.queues_global_input_waiting_tokens_count = [0 for _ in range(num_replicas)]
         self.queues_global_waiting_hit_tokens_count = [0 for _ in range(num_replicas)]
+        self.use_priority_sort = use_priority_sort
+
+    def _queue_priority_rank(self, request):
+        if self.use_priority_sort:
+            return getattr(request, "_priority_rank", 1)
+        return 1
 
     def _get_request_actual_prefill_tokens(self, request, negtive_prefix_cache_hit_len=None):
         if negtive_prefix_cache_hit_len is not None:
@@ -79,7 +85,7 @@ class GlobalRequestQueue:
                 logger.debug(f"priority:{priority_rank},{negtive_prefix_cache_hit_len},{round(time.perf_counter()-arrival_at,4)};req_id={req._id}")
 
     def push(self, replica_id, request, prefix_cache_hit_len):
-        priority_rank = getattr(request, "_priority_rank", 1)
+        priority_rank = self._queue_priority_rank(request)
         heapq.heappush(self.queues[replica_id], (priority_rank, -prefix_cache_hit_len, request._arrived_at, request._id, request))
         self.queues_global_actual_waiting_tokens_count[replica_id] += self._get_request_actual_prefill_tokens(request,-prefix_cache_hit_len)
         self.queues_global_waiting_hit_tokens_count[replica_id] += max(0, request._num_prefill_tokens - self._get_request_actual_prefill_tokens(request,-prefix_cache_hit_len))
@@ -165,7 +171,7 @@ class GlobalRequestQueue:
 
     def get_num_global_actual_waiting_tokens(self, replica_id, request, prefix_cache_hit_len):
         queue = self.queues[replica_id]
-        new_item = (getattr(request, "_priority_rank", 1), -prefix_cache_hit_len, request._arrived_at, request._id, request)
+        new_item = (self._queue_priority_rank(request), -prefix_cache_hit_len, request._arrived_at, request._id, request)
         simulated_queue = sorted(queue + [new_item])
         total_tokens = 0
         for item in simulated_queue:
@@ -177,7 +183,7 @@ class GlobalRequestQueue:
 
     def get_num_global_waiting_hit_tokens(self, replica_id, request, prefix_cache_hit_len):
         queue = self.queues[replica_id]
-        new_item = (getattr(request, "_priority_rank", 1), -prefix_cache_hit_len, request._arrived_at, request._id, request)
+        new_item = (self._queue_priority_rank(request), -prefix_cache_hit_len, request._arrived_at, request._id, request)
         simulated_queue = sorted(queue + [new_item])
         total_hit_tokens = 0
         for item in simulated_queue:
@@ -206,12 +212,16 @@ class DoubleHashGlobalSchedulerUtils():
         self.priority_policy = getattr(args, "priority_policy", "quantile")
         self.priority_quantile = getattr(args, "priority_quantile", 0.99)
         self.priority_window_size = max(1, int(getattr(args, "priority_window_size", 256)))
+        self.request_priority_affects_queue = getattr(args, "request_priority_affects_queue", False)
         self._priority_ttft_window = deque(maxlen=self.priority_window_size)
         self.replica_slo_budget = args.replica_slo_budget
         self.dh_recompute_punish_ratio = args.dh_recompute_punish_ratio
         self.rebalance_cnt = 0
         self.busy_prefill_interval = args.busy_prefill_interval
-        self.global_request_queue = GlobalRequestQueue(num_replicas)
+        self.global_request_queue = GlobalRequestQueue(
+            num_replicas,
+            use_priority_sort=self.request_priority_affects_queue,
+        )
 
     def estimate_ttft(self, waiting_tokens, waiting_hit_tokens, hit_tokens, waiting_local_hit_tokens=0, local_hit_tokens=0):
         waiting_remote_hit_tokens = max(0, waiting_hit_tokens - waiting_local_hit_tokens)
