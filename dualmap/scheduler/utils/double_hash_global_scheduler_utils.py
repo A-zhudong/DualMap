@@ -248,7 +248,7 @@ class DoubleHashGlobalSchedulerUtils():
         request._estimated_ttft = round(predicted_ttft, 4)
         high_priority_threshold = self._compute_priority_threshold()
         request._priority_threshold = round(high_priority_threshold, 4)
-        if self.priority_enabled and predicted_ttft <= high_priority_threshold:
+        if self.priority_enabled and predicted_ttft > high_priority_threshold:
             request._priority_level = "HIGH"
             request._priority_rank = 0
         else:

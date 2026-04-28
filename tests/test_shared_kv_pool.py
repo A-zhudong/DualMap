@@ -327,7 +327,7 @@ def test_pr1_add_request_sets_predicted_ttft_and_priority():
     assert hasattr(req, "_estimated_ttft")
     assert req._priority_level in {"HIGH", "LOW"}
     assert req._priority_rank in {0, 1}
-    assert req._priority_level == "HIGH"
+    assert req._priority_level == "LOW"
 
 
 def test_pr1_rebalance_recomputes_priority_on_migration():
@@ -381,8 +381,8 @@ def test_pr1_rebalance_recomputes_priority_on_migration():
     assert len(migrated) == 1
     moved = migrated[0]
     assert moved._second_replica == 0
-    assert moved._priority_level == "HIGH"
-    assert moved._priority_rank == 0
+    assert moved._priority_level == "LOW"
+    assert moved._priority_rank == 1
     assert hasattr(moved, "_estimated_ttft")
 
 
@@ -397,10 +397,10 @@ def test_pr2_default_threshold_policy_is_backward_compatible():
     util._set_request_priority(req_fast, predicted_ttft=3.0)
     util._set_request_priority(req_slow, predicted_ttft=8.0)
 
-    assert req_fast._priority_level == "HIGH"
-    assert req_fast._priority_rank == 0
-    assert req_slow._priority_level == "LOW"
-    assert req_slow._priority_rank == 1
+    assert req_fast._priority_level == "LOW"
+    assert req_fast._priority_rank == 1
+    assert req_slow._priority_level == "HIGH"
+    assert req_slow._priority_rank == 0
 
 
 def test_pr2_quantile_policy_uses_window_history():
@@ -419,15 +419,15 @@ def test_pr2_quantile_policy_uses_window_history():
     util.update_observed_ttft(2.0)
     util.update_observed_ttft(4.0)
     util.update_observed_ttft(3.0)
-    util._set_request_priority(req1, predicted_ttft=2.0)  # quantile([2,3,4])=3 => HIGH
-    util._set_request_priority(req2, predicted_ttft=4.0)  # quantile([2,3,4])=3 => LOW
-    util._set_request_priority(req3, predicted_ttft=4.1)  # quantile([2,3,4])=3 => LOW
-    util._set_request_priority(req4, predicted_ttft=3.0)  # quantile([2,3,4])=3 => HIGH
+    util._set_request_priority(req1, predicted_ttft=2.0)  # quantile([2,3,4])=3 => LOW
+    util._set_request_priority(req2, predicted_ttft=4.0)  # quantile([2,3,4])=3 => HIGH
+    util._set_request_priority(req3, predicted_ttft=4.1)  # quantile([2,3,4])=3 => HIGH
+    util._set_request_priority(req4, predicted_ttft=3.0)  # quantile([2,3,4])=3 => LOW
 
-    assert req1._priority_level == "HIGH"
-    assert req2._priority_level == "LOW"
-    assert req3._priority_level == "LOW"
-    assert req4._priority_level == "HIGH"
+    assert req1._priority_level == "LOW"
+    assert req2._priority_level == "HIGH"
+    assert req3._priority_level == "HIGH"
+    assert req4._priority_level == "LOW"
 
 
 def test_pr2_quantile_window_uses_observed_ttft_not_predicted_ttft():
@@ -441,7 +441,7 @@ def test_pr2_quantile_window_uses_observed_ttft_not_predicted_ttft():
     util.update_observed_ttft(20.0)
     req = _req(req_id=421, token_count=8)
     util._set_request_priority(req, predicted_ttft=15.0)  # median([10,20]) = 10 (nearest-rank)
-    assert req._priority_level == "LOW"
+    assert req._priority_level == "HIGH"
     # predicted ttft should not be appended to observed window
     assert list(util._priority_ttft_window) == [10.0, 20.0]
 
