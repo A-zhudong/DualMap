@@ -14,6 +14,7 @@ class DoubleHashGlobalScheduler(BaseGlobalScheduler):
         self.shared_state = shared_state
         self.double_hash_util = DoubleHashGlobalSchedulerUtils(num_replicas, shared_state, args)
         self.shared_state.set_scheduler_callback(self.schedule)
+        self.shared_state.set_priority_observed_ttft_callback(self.double_hash_util.update_observed_ttft)
 
 
     async def schedule(self, new_request: Request) -> int:
