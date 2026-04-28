@@ -13,6 +13,11 @@ from dualmap.logger import init_logger
 logger = init_logger(__name__)
 last_request_time = Optional[float]
 
+
+def get_prefix_kv_load_priority(request: Request) -> str:
+    priority_level = getattr(request, "_priority_level", "LOW")
+    return "high" if str(priority_level).upper() == "HIGH" else "low"
+
 def update_request_time():
     # logger.debug(f'update_request_time')
     last_request_time = time.perf_counter() 
@@ -64,6 +69,8 @@ async def async_send_request(metric_store, result_path, model_name,
         "max_tokens": request._output_len,
         "stream": True
     }
+    payload.setdefault("kv_transfer_params", {})
+    payload["kv_transfer_params"]["prefix_kv_load_priority"] = get_prefix_kv_load_priority(request)
     headers = {
         'Content-Type': 'application/json'
     }
@@ -92,7 +99,14 @@ async def async_send_request(metric_store, result_path, model_name,
         "rounting_cache_hit_max": request._rounting_cache_hit_max,
         "is_dh_cache_affinity": request._is_dh_cache_affinity,
         "is_dh_least_loaded": request._is_dh_least_loaded,
-        "is_dh_cache_affinity_least_loaded":request._is_dh_cache_affinity_least_loaded
+        "is_dh_cache_affinity_least_loaded":request._is_dh_cache_affinity_least_loaded,
+        "priority_enabled": getattr(request, "_priority_enabled", 0),
+        "priority_policy": getattr(request, "_priority_policy", ""),
+        "priority_level": getattr(request, "_priority_level", "LOW"),
+        "priority_predicted_ttft": getattr(request, "_estimated_ttft", -1),
+        "priority_threshold": getattr(request, "_priority_threshold", -1),
+        "priority_quantile": getattr(request, "_priority_quantile", -1),
+        "priority_window_size": getattr(request, "_priority_window_size", -1),
     }
     await metric_store.insert_metrics(data)
 
@@ -178,7 +192,14 @@ async def async_send_request(metric_store, result_path, model_name,
             "request_latency": round(request_latency, 4),
             "TPS(tokens/s)": round(request._output_len/request_latency, 4),
             "tpot(ms)": round(output.tpot*1000, 4),
-            "actual_num_prefill_tokens": request._actual_num_prefill_tokens
+            "actual_num_prefill_tokens": request._actual_num_prefill_tokens,
+            "priority_enabled": getattr(request, "_priority_enabled", 0),
+            "priority_policy": getattr(request, "_priority_policy", ""),
+            "priority_level": getattr(request, "_priority_level", "LOW"),
+            "priority_predicted_ttft": getattr(request, "_estimated_ttft", -1),
+            "priority_threshold": getattr(request, "_priority_threshold", -1),
+            "priority_quantile": getattr(request, "_priority_quantile", -1),
+            "priority_window_size": getattr(request, "_priority_window_size", -1),
         }
         await metric_store.update_metrics(str(request._id), updates) 
     else:

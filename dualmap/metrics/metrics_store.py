@@ -56,7 +56,9 @@ class MetricsStore:
                 fieldnames = ['request_id', 'dataset_type','request_start_time', 'request_end_time', 'native_session_id', 'round_id', 'replica_id', 
                             'time_to_first_token', 'request_latency', 'TPS(tokens/s)', 'tpot(ms)', 'num_request_pending', 'input_len', 
                             'output_len', 'pd_ratio', 'actual_num_prefill_tokens', 'req_arrived_at','time_interval','rounting_cache_hit_max',
-                            'is_dh_cache_affinity','is_dh_least_loaded','is_dh_cache_affinity_least_loaded']
+                            'is_dh_cache_affinity','is_dh_least_loaded','is_dh_cache_affinity_least_loaded',
+                            'priority_enabled','priority_policy','priority_level','priority_predicted_ttft',
+                            'priority_threshold','priority_quantile','priority_window_size']
                 writer = csv.DictWriter(output, fieldnames=fieldnames, lineterminator='\n')
                 writer.writeheader()
                 for row in self.data_cache.values():

@@ -69,6 +69,8 @@ class RequestGenerator:
         prompts = record["prompts"]
         input_ids = record["input_ids"]
         output_len = record["output_len"]
+        if getattr(self._args, "force_output_len_1", False):
+            output_len = 1
         g_session_id = record["g_session_id"]
         hash_session_id = record["hash_session_id"]
         hash_ids = record["hash_ids"]

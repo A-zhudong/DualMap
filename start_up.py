@@ -51,6 +51,15 @@ class Config:
     TTFT_SLO = 5 # second
     PREFILL_TPOT = 0.000127# 910b4 and Qwen2.5-7B-Instruct: 0.00016,   910b3 and Qwen2.5-14B-Instruct:0.000127
     TPRT = 0.0
+    LOCAL_HIT_TPRT = 0.0
+    REMOTE_HIT_TPRT = None
+    PRIORITY_ENABLED = True
+    PRIORITY_POLICY = "quantile"
+    PRIORITY_QUANTILE = 0.99
+    PRIORITY_WINDOW_SIZE = 256
+    REQUEST_PRIORITY_AFFECTS_QUEUE = False
+    ENABLE_SHARED_KV_POOL = False
+    FORCE_OUTPUT_LEN_1 = False
 
     PROCESS_CACHE_TTL = 1.0
     VLLM_START_TIMEOUT = 120
@@ -86,6 +95,15 @@ ttft_slo = Config.TTFT_SLO
 prefill_tpot = Config.PREFILL_TPOT
 tpct = prefill_tpot
 tprt = Config.TPRT
+local_hit_tprt = Config.LOCAL_HIT_TPRT
+remote_hit_tprt = tprt if Config.REMOTE_HIT_TPRT is None else Config.REMOTE_HIT_TPRT
+priority_policy = Config.PRIORITY_POLICY
+priority_quantile = Config.PRIORITY_QUANTILE
+priority_window_size = Config.PRIORITY_WINDOW_SIZE
+priority_enabled = Config.PRIORITY_ENABLED
+request_priority_affects_queue = Config.REQUEST_PRIORITY_AFFECTS_QUEUE
+enable_shared_kv_pool = Config.ENABLE_SHARED_KV_POOL
+force_output_len_1 = Config.FORCE_OUTPUT_LEN_1
 enable_scale = Config.ENABLE_SCALE
 
 request_active_timeout = 60 # seconds, client will be killed whnen no response after this timeout
@@ -141,6 +159,15 @@ def build_namespace(global_scheduler_type: str, qps: float,
         "prefill_tpot": prefill_tpot,
         "tpct": tpct,
         "tprt": tprt,
+        "local_hit_tprt": local_hit_tprt,
+        "remote_hit_tprt": remote_hit_tprt,
+        "priority_policy": priority_policy,
+        "priority_quantile": priority_quantile,
+        "priority_window_size": priority_window_size,
+        "priority_enabled": priority_enabled,
+        "request_priority_affects_queue": request_priority_affects_queue,
+        "enable_shared_kv_pool": enable_shared_kv_pool,
+        "force_output_len_1": force_output_len_1,
         "decode_busy_threshold": decode_busy_threshold,
         "dh_first_balance_ttft_thredhold": dh_first_balance_ttft_thredhold,
         "dh_rebalance_thredhold": dh_rebalance_thredhold,
@@ -775,6 +802,15 @@ if __name__ == "__main__":
     parser.add_argument('--prefill_tpot', type=float, default=0.000127, help='prefill tpot')  
     parser.add_argument('--tpct', type=float, default=None, help='time per compute token; defaults to prefill_tpot')
     parser.add_argument('--tprt', type=float, default=0.0, help='time per read token for KV cache transfer')
+    parser.add_argument('--local_hit_tprt', type=float, default=0.0, help='time per local-reuse token in TTFT estimation')
+    parser.add_argument('--remote_hit_tprt', type=float, default=None, help='time per cross-instance-reuse token in TTFT estimation; defaults to tprt')
+    parser.add_argument('--priority_enabled', type=lambda x: str(x).lower() in ("1", "true", "yes", "y"), default=True, help='enable request priority labeling')
+    parser.add_argument('--priority_policy', type=str, default="quantile", choices=["threshold", "quantile"], help='priority policy: quantile(default) or threshold')
+    parser.add_argument('--priority_quantile', type=float, default=0.99, help='quantile used when --priority_policy=quantile')
+    parser.add_argument('--priority_window_size', type=int, default=256, help='history window size used when --priority_policy=quantile')
+    parser.add_argument('--request_priority_affects_queue', action='store_true', help='if set, global queue ordering uses request priority rank before cache-hit/arrival')
+    parser.add_argument('--enable_shared_kv_pool', action='store_true', help='enable shared KV pool semantics across replicas')
+    parser.add_argument('--force_output_len_1', action='store_true', help='force max output tokens to 1 for prefill-focused runs')
     parser.add_argument('--global_scheduler_type', type=str, default="cache_affinity", help='comma-separated scheduler types, e.g. "cache_affinity,dualmap"')  
     parser.add_argument('--ttft_slo', type=int, default=5, help='ttft_slo seconds')  
     parser.add_argument('--request_num', type=int, default=8000, help='request num')  
@@ -796,6 +832,15 @@ if __name__ == "__main__":
     prefill_tpot = args.prefill_tpot
     tpct = args.tpct if args.tpct is not None else args.prefill_tpot
     tprt = args.tprt
+    local_hit_tprt = args.local_hit_tprt
+    remote_hit_tprt = args.remote_hit_tprt if args.remote_hit_tprt is not None else args.tprt
+    priority_policy = args.priority_policy
+    priority_quantile = args.priority_quantile
+    priority_window_size = args.priority_window_size
+    priority_enabled = args.priority_enabled
+    request_priority_affects_queue = args.request_priority_affects_queue
+    enable_shared_kv_pool = args.enable_shared_kv_pool
+    force_output_len_1 = args.force_output_len_1
     ttft_slo = args.ttft_slo
 
     
